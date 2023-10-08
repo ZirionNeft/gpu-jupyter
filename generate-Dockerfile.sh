@@ -5,7 +5,7 @@ cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
 export DOCKERFILE=".build/Dockerfile"
 export STACKS_DIR=".build/docker-stacks"
 # please test the build of the commit in https://github.com/jupyter/docker-stacks/commits/main in advance
-export HEAD_COMMIT="efa95c2c5b9b095247cd2f5e55bc3b38c85da335"
+export HEAD_COMMIT="fbbf24585dd63f0d6a6709aed1640f03782bf21f"
 
 while [[ "$#" -gt 0 ]]; do case $1 in
   -p|--pw|--password) PASSWORD="$2" && USE_PASSWORD=1; shift;;
@@ -63,33 +63,45 @@ cat src/Dockerfile.header >> $DOCKERFILE
 
 echo "
 ############################################################################
+################# Dependency: jupyter/docker-stacks-foundation #############
+############################################################################
+" >> $DOCKERFILE
+cat $STACKS_DIR/images/docker-stacks-foundation/Dockerfile | grep -v 'BASE_CONTAINER' | grep -v 'FROM $ROOT_CONTAINER' >> $DOCKERFILE
+
+cp $STACKS_DIR/images/docker-stacks-foundation/start.sh .build/
+cp $STACKS_DIR/images/docker-stacks-foundation/run-hooks.sh .build/
+cp $STACKS_DIR/images/docker-stacks-foundation/initial-condarc .build/
+cp $STACKS_DIR/images/docker-stacks-foundation/fix-permissions .build/
+
+echo "
+############################################################################
 #################### Dependency: jupyter/base-image ########################
 ############################################################################
 " >> $DOCKERFILE
-cat $STACKS_DIR/base-notebook/Dockerfile | grep -v 'BASE_CONTAINER' | grep -v 'FROM $ROOT_CONTAINER' >> $DOCKERFILE
+cat $STACKS_DIR/images/base-notebook/Dockerfile | grep -v BASE_CONTAINER >> $DOCKERFILE
 
 # copy files that are used during the build:
-cp $STACKS_DIR/base-notebook/jupyter_server_config.py .build/
-cp $STACKS_DIR/base-notebook/initial-condarc .build/
-cp $STACKS_DIR/base-notebook/fix-permissions .build/
-cp $STACKS_DIR/base-notebook/start.sh .build/
-cp $STACKS_DIR/base-notebook/start-notebook.sh .build/
-cp $STACKS_DIR/base-notebook/start-singleuser.sh .build/
-chmod 755 .build/*
+cp $STACKS_DIR/images/base-notebook/jupyter_server_config.py .build/
+cp $STACKS_DIR/images/base-notebook/docker_healthcheck.py .build/
+cp $STACKS_DIR/images/base-notebook/start-notebook.sh .build/
+cp $STACKS_DIR/images/base-notebook/start-singleuser.sh .build/
 
 echo "
 ############################################################################
 ################# Dependency: jupyter/minimal-notebook #####################
 ############################################################################
 " >> $DOCKERFILE
-cat $STACKS_DIR/minimal-notebook/Dockerfile | grep -v BASE_CONTAINER >> $DOCKERFILE
+cat $STACKS_DIR/images/minimal-notebook/Dockerfile | grep -v BASE_CONTAINER >> $DOCKERFILE
+
+cp -r $STACKS_DIR/images/minimal-notebook/setup-scripts .build/
+cp $STACKS_DIR/images/minimal-notebook/Rprofile.site .build/
 
 echo "
 ############################################################################
 ################# Dependency: jupyter/scipy-notebook #######################
 ############################################################################
 " >> $DOCKERFILE
-cat $STACKS_DIR/scipy-notebook/Dockerfile | grep -v BASE_CONTAINER >> $DOCKERFILE
+cat $STACKS_DIR/images/scipy-notebook/Dockerfile | grep -v BASE_CONTAINER >> $DOCKERFILE
 
 # install Julia and R if not excluded or spare mode is used
 if [[ "$no_datascience_notebook" != 1 ]]; then
@@ -98,7 +110,7 @@ if [[ "$no_datascience_notebook" != 1 ]]; then
   ################ Dependency: jupyter/datascience-notebook ##################
   ############################################################################
   " >> $DOCKERFILE
-  cat $STACKS_DIR/datascience-notebook/Dockerfile | grep -v BASE_CONTAINER >> $DOCKERFILE
+  cat $STACKS_DIR/images/datascience-notebook/Dockerfile | grep -v BASE_CONTAINER >> $DOCKERFILE
 else
   echo "Set 'no-datascience-notebook' = 'python-only', not installing the datascience-notebook with Julia and R."
 fi
@@ -123,6 +135,9 @@ if [[ "$no_useful_packages" != 1 ]]; then
 else
   echo "Set 'no-useful-packages', not installing stuff within src/Dockerfile.usefulpackages."
 fi
+
+# Change permissions for all copied scripts
+chmod 755 .build/*
 
 # Copy the demo notebooks and change permissions
 cp -r extra/Getting_Started data

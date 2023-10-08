@@ -7,7 +7,7 @@
 
 # Use NVIDIA CUDA as base image and run the same installation as in the other packages.
 # The version of cuda must match those of the packages installed in src/Dockerfile.gpulibs
-FROM nvidia/cuda:11.6.2-cudnn8-runtime-ubuntu20.04
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
 LABEL authors="Christoph Schranz <christoph.schranz@salzburgresearch.at>, Mathematical Michael <consistentbayes@gmail.com>"
 # This is a concatenated Dockerfile, the maintainers of subsequent sections may vary.
 RUN chmod 1777 /tmp && chmod 1777 /var/tmp
@@ -17,15 +17,15 @@ RUN apt-get update && \
     apt-get -y install apt-utils
 
 ############################################################################
-#################### Dependency: jupyter/base-image ########################
+################# Dependency: jupyter/docker-stacks-foundation #############
 ############################################################################
 
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 
-# Ubuntu 20.04 (focal)
-# https://hub.docker.com/_/ubuntu/?tab=tags&name=focal
-ARG ROOT_CONTAINER=ubuntu:focal
+# Ubuntu 22.04 (jammy)
+# https://hub.docker.com/_/ubuntu/tags?page=1&name=jammy
+ARG ROOT_CONTAINER=ubuntu:22.04
 
 
 LABEL maintainer="Jupyter Project <jupyter@googlegroups.com>"
@@ -39,8 +39,8 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 USER root
 
-# Install all OS dependencies for notebook server that starts but lacks all
-# features (e.g., download as all possible file formats)
+# Install all OS dependencies for Server that starts
+# but lacks all features (e.g., download as all possible file formats)
 ENV DEBIAN_FRONTEND noninteractive
 RUN apt-get update --yes && \
     # - apt-get upgrade is run to patch known vulnerabilities in apt-get packages as
@@ -50,15 +50,7 @@ RUN apt-get update --yes && \
     # - bzip2 is necessary to extract the micromamba executable.
     bzip2 \
     ca-certificates \
-    fonts-liberation \
     locales \
-    # - pandoc is used to convert notebooks to html files
-    #   it's not present in arm64 ubuntu image, so we install it here
-    pandoc \
-    # - run-one - a wrapper script that runs no more
-    #   than one unique  instance  of  some  command with a unique set of arguments,
-    #   we use `run-one-constantly` to support `RESTARTABLE` option
-    run-one \
     sudo \
     # - tini is installed as a helpful container entrypoint that reaps zombie
     #   processes and such of the actual executable we want to start, see
@@ -96,17 +88,17 @@ RUN sed -i 's/^#force_color_prompt=yes/force_color_prompt=yes/' /etc/skel/.bashr
 RUN echo "auth requisite pam_deny.so" >> /etc/pam.d/su && \
     sed -i.bak -e 's/^%admin/#%admin/' /etc/sudoers && \
     sed -i.bak -e 's/^%sudo/#%sudo/' /etc/sudoers && \
-    useradd -l -m -s /bin/bash -N -u "${NB_UID}" "${NB_USER}" && \
+    useradd --no-log-init --create-home --shell /bin/bash --uid "${NB_UID}" --no-user-group "${NB_USER}" && \
     mkdir -p "${CONDA_DIR}" && \
     chown "${NB_USER}:${NB_GID}" "${CONDA_DIR}" && \
     chmod g+w /etc/passwd && \
-    fix-permissions "${HOME}" && \
-    fix-permissions "${CONDA_DIR}"
+    fix-permissions "${CONDA_DIR}" && \
+    fix-permissions "/home/${NB_USER}"
 
 USER ${NB_UID}
 
 # Pin python version here, or set it to "default"
-ARG PYTHON_VERSION=3.10
+ARG PYTHON_VERSION=3.11
 
 # Setup work directory for backward-compatibility
 RUN mkdir "/home/${NB_USER}/work" && \
@@ -117,8 +109,7 @@ RUN mkdir "/home/${NB_USER}/work" && \
 #   Similar projects using Micromamba:
 #     - Micromamba-Docker: <https://github.com/mamba-org/micromamba-docker>
 #     - repo2docker: <https://github.com/jupyterhub/repo2docker>
-# Install Python, Mamba, Jupyter Notebook, Lab, and Hub
-# Generate a notebook server config
+# Install Python, Mamba and jupyter_core
 # Cleanup temporary files and remove Micromamba
 # Correct permissions
 # Do all this in a single RUN command to avoid duplicating all of the
@@ -131,7 +122,7 @@ RUN set -x && \
         # Should be simpler, see <https://github.com/mamba-org/mamba/issues/1437>
         arch="64"; \
     fi && \
-    wget -qO /tmp/micromamba.tar.bz2 \
+    wget --progress=dot:giga -O /tmp/micromamba.tar.bz2 \
         "https://micromamba.snakepit.net/api/micromamba/linux-${arch}/latest" && \
     tar -xvjf /tmp/micromamba.tar.bz2 --strip-components=1 bin/micromamba && \
     rm /tmp/micromamba.tar.bz2 && \
@@ -144,13 +135,77 @@ RUN set -x && \
         --yes \
         "${PYTHON_SPECIFIER}" \
         'mamba' \
-        'notebook' \
-        'jupyterhub' \
-        'jupyterlab' && \
+        'jupyter_core' && \
     rm micromamba && \
     # Pin major.minor version of python
     mamba list python | grep '^python ' | tr -s ' ' | cut -d ' ' -f 1,2 >> "${CONDA_DIR}/conda-meta/pinned" && \
-    jupyter notebook --generate-config && \
+    mamba clean --all -f -y && \
+    fix-permissions "${CONDA_DIR}" && \
+    fix-permissions "/home/${NB_USER}"
+
+# Configure container startup
+ENTRYPOINT ["tini", "-g", "--"]
+CMD ["start.sh"]
+
+# Copy local files as late as possible to avoid cache busting
+COPY run-hooks.sh start.sh /usr/local/bin/
+
+USER root
+
+# Create dirs for startup hooks
+RUN mkdir /usr/local/bin/start-notebook.d && \
+    mkdir /usr/local/bin/before-notebook.d
+
+# Switch back to jovyan to avoid accidental container runs as root
+USER ${NB_UID}
+
+WORKDIR "${HOME}"
+
+############################################################################
+#################### Dependency: jupyter/base-image ########################
+############################################################################
+
+# Copyright (c) Jupyter Development Team.
+# Distributed under the terms of the Modified BSD License.
+ARG OWNER=jupyter
+
+LABEL maintainer="Jupyter Project <jupyter@googlegroups.com>"
+
+# Fix: https://github.com/hadolint/hadolint/wiki/DL4006
+# Fix: https://github.com/koalaman/shellcheck/wiki/SC3014
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+USER root
+
+# Install all OS dependencies for Server that starts but lacks all
+# features (e.g., download as all possible file formats)
+RUN apt-get update --yes && \
+    apt-get install --yes --no-install-recommends \
+    fonts-liberation \
+    # - pandoc is used to convert notebooks to html files
+    #   it's not present in aarch64 ubuntu image, so we install it here
+    pandoc \
+    # - run-one - a wrapper script that runs no more
+    #   than one unique  instance  of  some  command with a unique set of arguments,
+    #   we use `run-one-constantly` to support `RESTARTABLE` option
+    run-one && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+USER ${NB_UID}
+
+# Install JupyterLab, Jupyter Notebook, JupyterHub and NBClassic
+# Generate a Jupyter Server config
+# Cleanup temporary files
+# Correct permissions
+# Do all this in a single RUN command to avoid duplicating all of the
+# files across image layers when the permissions change
+WORKDIR /tmp
+RUN mamba install --yes \
+    'jupyterlab' \
+    'notebook' \
+    'jupyterhub' \
+    'nbclassic' && \
+    jupyter server --generate-config && \
     mamba clean --all -f -y && \
     npm cache clean --force && \
     jupyter lab clean && \
@@ -158,31 +213,25 @@ RUN set -x && \
     fix-permissions "${CONDA_DIR}" && \
     fix-permissions "/home/${NB_USER}"
 
-EXPOSE 8888
+ENV JUPYTER_PORT=8888
+EXPOSE $JUPYTER_PORT
 
 # Configure container startup
-ENTRYPOINT ["tini", "-g", "--"]
 CMD ["start-notebook.sh"]
 
 # Copy local files as late as possible to avoid cache busting
-COPY start.sh start-notebook.sh start-singleuser.sh /usr/local/bin/
-# Currently need to have both jupyter_notebook_config and jupyter_server_config to support classic and lab
-COPY jupyter_server_config.py /etc/jupyter/
+COPY start-notebook.sh start-singleuser.sh /usr/local/bin/
+COPY jupyter_server_config.py docker_healthcheck.py /etc/jupyter/
 
 # Fix permissions on /etc/jupyter as root
 USER root
-
-# Legacy for Jupyter Notebook Server, see: [#1205](https://github.com/jupyter/docker-stacks/issues/1205)
-RUN sed -re "s/c.ServerApp/c.NotebookApp/g" \
-    /etc/jupyter/jupyter_server_config.py > /etc/jupyter/jupyter_notebook_config.py && \
-    fix-permissions /etc/jupyter/
+RUN fix-permissions /etc/jupyter/
 
 # HEALTHCHECK documentation: https://docs.docker.com/engine/reference/builder/#healthcheck
 # This healtcheck works well for `lab`, `notebook`, `nbclassic`, `server` and `retro` jupyter commands
 # https://github.com/jupyter/docker-stacks/issues/915#issuecomment-1068528799
-HEALTHCHECK  --interval=15s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget -O- --no-verbose --tries=1 --no-check-certificate \
-    http${GEN_CERT:+s}://localhost:8888${JUPYTERHUB_SERVICE_PREFIX:-/}api || exit 1
+HEALTHCHECK --interval=5s --timeout=3s --start-period=5s --retries=3 \
+    CMD /etc/jupyter/docker_healthcheck.py || exit 1
 
 # Switch back to jovyan to avoid accidental container runs as root
 USER ${NB_UID}
@@ -205,17 +254,16 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 USER root
 
-# Install all OS dependencies for fully functional notebook server
+# Install all OS dependencies for fully functional Server
 RUN apt-get update --yes && \
     apt-get install --yes --no-install-recommends \
     # Common useful utilities
+    curl \
     git \
     nano-tiny \
     tzdata \
     unzip \
     vim-tiny \
-    # Inkscape is installed to be able to convert SVG files
-    inkscape \
     # git-over-ssh
     openssh-client \
     # less is needed to run help in R
@@ -225,7 +273,9 @@ RUN apt-get update --yes && \
     # https://nbconvert.readthedocs.io/en/latest/install.html#installing-tex
     texlive-xetex \
     texlive-fonts-recommended \
-    texlive-plain-generic && \
+    texlive-plain-generic \
+    # Enable clipboard on Linux host systems
+    xclip && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Create alternative for nano -> nano-tiny
@@ -233,6 +283,12 @@ RUN update-alternatives --install /usr/bin/nano nano /bin/nano-tiny 10
 
 # Switch back to jovyan to avoid accidental container runs as root
 USER ${NB_UID}
+
+# Add R mimetype option to specify how the plot returns from R to the browser
+COPY --chown=${NB_UID}:${NB_GID} Rprofile.site /opt/conda/lib/R/etc/
+
+# Add setup scripts that may be used by downstream images or inherited images
+COPY setup-scripts/ /opt/setup-scripts/
 
 ############################################################################
 ################# Dependency: jupyter/scipy-notebook #######################
@@ -263,8 +319,12 @@ RUN apt-get update --yes && \
 
 USER ${NB_UID}
 
+# mamba downgrades these packages to previous major versions, which causes issues
+RUN echo 'jupyterlab >=4.0.4' >> "${CONDA_DIR}/conda-meta/pinned" && \
+    echo 'notebook >=7.0.2' >> "${CONDA_DIR}/conda-meta/pinned"
+
 # Install Python 3 packages
-RUN mamba install --quiet --yes \
+RUN mamba install --yes \
     'altair' \
     'beautifulsoup4' \
     'bokeh' \
@@ -277,9 +337,11 @@ RUN mamba install --quiet --yes \
     'h5py' \
     'ipympl'\
     'ipywidgets' \
+    'jupyterlab-git' \
     'matplotlib-base' \
     'numba' \
     'numexpr' \
+    'openpyxl' \
     'pandas' \
     'patsy' \
     'protobuf' \
@@ -299,8 +361,8 @@ RUN mamba install --quiet --yes \
 
 # Install facets which does not have a pip or conda package at the moment
 WORKDIR /tmp
-RUN git clone https://github.com/PAIR-code/facets.git && \
-    jupyter nbextension install facets/facets-dist/ --sys-prefix && \
+RUN git clone https://github.com/PAIR-code/facets && \
+    jupyter nbclassic-extension install facets/facets-dist/ --sys-prefix && \
     rm -rf /tmp/facets && \
     fix-permissions "${CONDA_DIR}" && \
     fix-permissions "/home/${NB_USER}"
@@ -326,7 +388,7 @@ LABEL maintainer="Christoph Schranz <christoph.schranz@salzburgresearch.at>, Mat
 # installation via conda leads to errors in version 4.8.2
 USER ${NB_UID}
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir tensorflow==2.10.1 keras==2.10 && \
+    pip install --no-cache-dir tensorflow==2.14.0 keras==2.14.0 && \
     fix-permissions "${CONDA_DIR}" && \
     fix-permissions "/home/${NB_USER}"
 
@@ -344,9 +406,9 @@ RUN conda install --quiet --yes \
 #     torchviz==0.0.2 --extra-index-url https://download.pytorch.org/whl/cu116
 RUN set -ex \
  && buildDeps=' \
-    torch==1.13.1 \
-    torchvision==0.14.1 \
-    torchaudio==0.13.1 \
+    torch==2.1.0 \
+    torchvision==0.16 \
+    torchaudio==2.1.0 \
     torchviz==0.0.2 \
 ' \
  && pip install --no-cache-dir $buildDeps --extra-index-url https://download.pytorch.org/whl/cu116 \
@@ -398,27 +460,43 @@ RUN set -ex \
 
 # upgrade jupyter-server for compatibility
 RUN pip install --no-cache-dir --upgrade \
-    distributed==2023.3.0 \
-    jupyter-server==2.4 \
+    distributed==2023.9.3 \
+    jupyter-server==2.7.3 \
     # fix permissions of conda
  && fix-permissions "${CONDA_DIR}" \
  && fix-permissions "/home/${NB_USER}"
 
+# Copy the pre-configured ipython_config.py file into the container
+COPY ipython_config.py "/home/${NB_USER}/.ipython/ipython_config.py"
+
+# In order to allow jupyterlab-lsp to navigate to external files such as packages installed system-wide or to
+# libraries inside a virtual environment (conda, pip, ...) this access control mechanism needs to be circumvented
+RUN ln -s / .lsp_symlink && \
+    fix-permissions "/home/${NB_USER}"
+
+RUN echo -e "\nc.ContentsManager.allow_hidden = True" | \
+    tee -a /etc/jupyter/jupyter_server_config.py \
+    /etc/jupyter/jupyter_notebook_config.py && \
+    fix-permissions "/home/${NB_USER}"
+
 RUN pip install --no-cache-dir \
     # install extension manager
     jupyter_contrib_nbextensions==0.7.0 \
-    jupyter_nbextensions_configurator==0.6.1 \
+    jupyter_nbextensions_configurator==0.6.3 \
     # install git extension
-    jupyterlab-git==0.41.0 \
+    jupyterlab-git==0.43.0 \
     # install plotly extension
-    plotly==5.13.1 \
+    # plotly==5.17.0 \
     # install drawio and graphical extensions
-    jupyterlab-drawio==0.9.0 \
-    rise==5.7.1 \
-    ipyleaflet==0.17.2 \
-    ipywidgets==8.0.4 \
+    # jupyterlab-drawio==0.9.0 \
+    # rise==5.7.1 \
+    ipyleaflet==0.17.4 \
+    ipywidgets==8.1.1 \
     # install spell checker
-    jupyterlab-spellchecker==0.7.3 && \
+    jupyterlab-spellchecker==0.8.4 \
+    # install jupyterlab LSP
+    jupyterlab-lsp==4.3.0 \
+    'python-lsp-server[all]' && \
     # fix permissions of conda
     fix-permissions "${CONDA_DIR}" && \
     fix-permissions "/home/${NB_USER}"
