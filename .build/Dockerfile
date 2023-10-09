@@ -393,27 +393,29 @@ RUN pip install --upgrade pip && \
     fix-permissions "/home/${NB_USER}"
 
 # Install PyTorch with dependencies
-RUN conda install --quiet --yes \
-    pyyaml mkl mkl-include setuptools cmake cffi typing && \
-    conda clean --all -f -y && \
-    fix-permissions "${CONDA_DIR}" && \
-    fix-permissions "/home/${NB_USER}"
+# RUN conda install --quiet --yes \
+#    pyyaml mkl mkl-include setuptools cmake cffi typing && \
+#    conda clean --all -f -y && \
+#    fix-permissions "${CONDA_DIR}" && \
+#    fix-permissions "/home/${NB_USER}"
 
 # Check compatibility here:
 # https://pytorch.org/get-started/locally/
 # Installation via conda leads to errors installing cudatoolkit=11.1
-# RUN pip install --no-cache-dir torch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1  && \
-#     torchviz==0.0.2 --extra-index-url https://download.pytorch.org/whl/cu116
-RUN set -ex \
- && buildDeps=' \
-    torch==2.1.0 \
-    torchvision==0.16 \
-    torchaudio==2.1.0 \
-    torchviz==0.0.2 \
-' \
- && pip install --no-cache-dir $buildDeps --extra-index-url https://download.pytorch.org/whl/cu116 \
- && fix-permissions "${CONDA_DIR}" \
- && fix-permissions "/home/${NB_USER}"
+RUN conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia && \
+    fix-permissions "${CONDA_DIR}" && \
+    fix-permissions "/home/${NB_USER}"
+
+# RUN set -ex \
+#  && buildDeps=' \
+#     torch==2.1.0 \
+#     torchvision==0.16 \
+#     torchaudio==2.1.0 \
+#     torchviz==0.0.2 \
+# ' \
+#  && pip install --no-cache-dir $buildDeps --extra-index-url https://download.pytorch.org/whl/cu116 \
+#  && fix-permissions "${CONDA_DIR}" \
+#  && fix-permissions "/home/${NB_USER}"
 
 USER root
 ENV CUDA_PATH=/opt/conda/
@@ -448,6 +450,11 @@ RUN apt-get update \
  && apt-get -y install --no-install-recommends htop apt-utils iputils-ping graphviz libgraphviz-dev openssh-client \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# In order to allow jupyterlab-lsp to navigate to external files such as packages installed system-wide or to
+# libraries inside a virtual environment (conda, pip, ...) this access control mechanism needs to be circumvented
+RUN ln -s / .lsp_symlink && \
+    fix-permissions "/home/${NB_USER}"
+
 USER $NB_UID
 RUN set -ex \
  && buildDeps=' \
@@ -467,12 +474,7 @@ RUN pip install --no-cache-dir --upgrade \
  && fix-permissions "/home/${NB_USER}"
 
 # Copy the pre-configured ipython_config.py file into the container
-COPY ipython_config.py "/home/${NB_USER}/.ipython/ipython_config.py"
-
-# In order to allow jupyterlab-lsp to navigate to external files such as packages installed system-wide or to
-# libraries inside a virtual environment (conda, pip, ...) this access control mechanism needs to be circumvented
-RUN ln -s / .lsp_symlink && \
-    fix-permissions "/home/${NB_USER}"
+COPY ipython_config.py "/etc/ipython/ipython_config.py"
 
 RUN echo -e "\nc.ContentsManager.allow_hidden = True" | \
     tee -a /etc/jupyter/jupyter_server_config.py \
@@ -495,7 +497,7 @@ RUN pip install --no-cache-dir \
     # install spell checker
     jupyterlab-spellchecker==0.8.4 \
     # install jupyterlab LSP
-    jupyterlab-lsp==4.3.0 \
+    jupyterlab-lsp==5.0.0 \
     'python-lsp-server[all]' && \
     # fix permissions of conda
     fix-permissions "${CONDA_DIR}" && \
